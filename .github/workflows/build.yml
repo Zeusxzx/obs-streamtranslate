@@ -22,3 +22,38 @@ jobs:
         with:
           name: obs-streamtranslate-linux
           path: build/obs-streamtranslate.so
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install libwebsockets pkg-config
+      - name: Fetch libobs headers
+        run: git clone --depth 1 https://github.com/obsproject/obs-studio.git
+      - name: Compile plugin bundle
+        run: |
+          mkdir -p dist/obs-streamtranslate.plugin/Contents/MacOS
+          clang -bundle -O2 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
+            plugin.c \
+            -I obs-studio/libobs \
+            $(pkg-config --cflags --libs libwebsockets) \
+            -undefined dynamic_lookup
+          cat > dist/obs-streamtranslate.plugin/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>obs-streamtranslate</string>
+            <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
+            <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
+            <key>CFBundlePackageType</key><string>BNDL</string>
+            <key>CFBundleVersion</key><string>0.1.0</string>
+          </dict>
+          </plist>
+          PLIST
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-streamtranslate-macos-arm64
+          path: dist/
