@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+  <title>StreamTranslate OBS Plugin</title>
+  <welcome file="welcome.html"/>
+  <background file="background.png" alignment="bottomleft" scaling="proportional"/>
+  <options customize="never" require-scripts="false"/>
+  <choices-outline>
+    <line choice="default">
+      <line choice="live.streamtranslate.obs-plugin"/>
+    </line>
+  </choices-outline>
+  <choice id="default"/>
+  <choice id="live.streamtranslate.obs-plugin" visible="false">
+    <pkg-ref id="live.streamtranslate.obs-plugin"/>
+  </choice>
+  <pkg-ref id="live.streamtranslate.obs-plugin" version="0.1.0" onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>
