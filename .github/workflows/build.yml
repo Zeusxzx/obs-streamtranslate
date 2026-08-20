@@ -37,6 +37,7 @@ jobs:
           clang -bundle -O2 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
             plugin.c \
             -I obs-studio/libobs \
+            -I obs-studio/deps/simde \
             $(pkg-config --cflags --libs libwebsockets) \
             -undefined dynamic_lookup
           cat > dist/obs-streamtranslate.plugin/Contents/Info.plist << 'PLIST'
