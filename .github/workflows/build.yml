@@ -101,7 +101,7 @@ jobs:
           echo "--- final link check ---"
           otool -L "$BIN"
           otool -L "$FW/$LWS_BASE"
-      - name: Build .pkg installer
+      - name: Build branded .pkg installer
         run: |
           mkdir -p pkgroot out
           cp -R dist/obs-streamtranslate.plugin pkgroot/
@@ -109,6 +109,10 @@ jobs:
             --identifier live.streamtranslate.obs-plugin \
             --version 0.1.0 \
             --install-location "/Library/Application Support/obs-studio/plugins" \
+            component.pkg
+          productbuild --distribution installer/distribution.xml \
+            --resources installer \
+            --package-path . \
             out/StreamTranslate-OBS-Plugin.pkg
       - name: Upload artifact
         uses: actions/upload-artifact@v4
