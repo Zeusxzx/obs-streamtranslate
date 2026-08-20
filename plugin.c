@@ -1,0 +1,386 @@
+/*
+ * obs-streamtranslate — streams an OBS audio source to StreamTranslate for
+ * real-time translated captions, from inside any OBS instance (including
+ * cloud-hosted ones like IRLToolkit where no local browser exists).
+ *
+ * Design: an audio FILTER you attach to the audio source you stream with.
+ * It passes audio through untouched, and in parallel converts it to mono
+ * s16le at the OBS pipeline sample rate and ships it over a TLS websocket
+ * to wss://<server>/audio?pluginKey=...&rate=<hz>. The plugin key is the
+ * only credential — generate it from your StreamTranslate account.
+ *
+ * Linux-compilable (IRLToolkit third-party plugin requirement).
+ * Deps: libobs, libwebsockets.
+ */
+
+#include <obs-module.h>
+#include <media-io/audio-resampler.h>
+#include <media-io/audio-io.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <libwebsockets.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+OBS_DECLARE_MODULE()
+
+#define ST_QUEUE_MAX 256 /* ~30s of 120ms chunks — drop oldest beyond this */
+
+struct st_chunk {
+	struct st_chunk *next;
+	size_t len;
+	unsigned char *buf; /* includes LWS_PRE headroom; payload at buf+LWS_PRE */
+};
+
+struct st_filter {
+	obs_source_t *context;
+
+	/* config */
+	char server[256];
+	char plugin_key[128];
+
+	/* audio conversion */
+	audio_resampler_t *resampler;
+	uint32_t sample_rate;
+
+	/* websocket service thread */
+	pthread_t thread;
+	volatile bool stop;
+	volatile bool connected;
+	struct lws_context *lws_ctx;
+	struct lws *wsi;
+
+	/* outbound queue (audio thread -> ws thread) */
+	pthread_mutex_t qlock;
+	struct st_chunk *qhead, *qtail;
+	int qcount;
+};
+
+/* ---------------- queue ---------------- */
+
+static void st_queue_clear(struct st_filter *f)
+{
+	pthread_mutex_lock(&f->qlock);
+	struct st_chunk *c = f->qhead;
+	while (c) {
+		struct st_chunk *n = c->next;
+		free(c->buf);
+		free(c);
+		c = n;
+	}
+	f->qhead = f->qtail = NULL;
+	f->qcount = 0;
+	pthread_mutex_unlock(&f->qlock);
+}
+
+static void st_queue_push(struct st_filter *f, const unsigned char *data, size_t len)
+{
+	struct st_chunk *c = malloc(sizeof(*c));
+	if (!c)
+		return;
+	c->buf = malloc(LWS_PRE + len);
+	if (!c->buf) {
+		free(c);
+		return;
+	}
+	memcpy(c->buf + LWS_PRE, data, len);
+	c->len = len;
+	c->next = NULL;
+
+	pthread_mutex_lock(&f->qlock);
+	if (f->qcount >= ST_QUEUE_MAX && f->qhead) {
+		struct st_chunk *old = f->qhead;
+		f->qhead = old->next;
+		if (!f->qhead)
+			f->qtail = NULL;
+		f->qcount--;
+		free(old->buf);
+		free(old);
+	}
+	if (f->qtail)
+		f->qtail->next = c;
+	else
+		f->qhead = c;
+	f->qtail = c;
+	f->qcount++;
+	pthread_mutex_unlock(&f->qlock);
+}
+
+static struct st_chunk *st_queue_pop(struct st_filter *f)
+{
+	pthread_mutex_lock(&f->qlock);
+	struct st_chunk *c = f->qhead;
+	if (c) {
+		f->qhead = c->next;
+		if (!f->qhead)
+			f->qtail = NULL;
+		f->qcount--;
+	}
+	pthread_mutex_unlock(&f->qlock);
+	return c;
+}
+
+/* ---------------- websocket ---------------- */
+
+static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
+			  void *user, void *in, size_t len)
+{
+	struct st_filter *f = lws_context_user(lws_get_context(wsi));
+	(void)user;
+	(void)in;
+	(void)len;
+	if (!f)
+		return 0;
+
+	switch (reason) {
+	case LWS_CALLBACK_CLIENT_ESTABLISHED:
+		blog(LOG_INFO, "[streamtranslate] websocket connected");
+		f->connected = true;
+		lws_callback_on_writable(wsi);
+		break;
+
+	case LWS_CALLBACK_CLIENT_WRITEABLE: {
+		struct st_chunk *c = st_queue_pop(f);
+		if (c) {
+			lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
+			free(c->buf);
+			free(c);
+			lws_callback_on_writable(wsi);
+		}
+		break;
+	}
+
+	case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+		if (f->wsi && f->connected)
+			lws_callback_on_writable(f->wsi);
+		break;
+
+	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+		blog(LOG_WARNING, "[streamtranslate] connection error: %s",
+		     in ? (const char *)in : "(unknown)");
+		f->connected = false;
+		f->wsi = NULL;
+		break;
+
+	case LWS_CALLBACK_CLIENT_CLOSED:
+		blog(LOG_INFO, "[streamtranslate] websocket closed");
+		f->connected = false;
+		f->wsi = NULL;
+		break;
+
+	default:
+		break;
+	}
+	return 0;
+}
+
+static const struct lws_protocols st_protocols[] = {
+	{"st-audio", st_ws_callback, 0, 4096, 0, NULL, 0},
+	LWS_PROTOCOL_LIST_TERM,
+};
+
+static void st_connect(struct st_filter *f)
+{
+	if (!f->lws_ctx || f->wsi)
+		return;
+	if (!f->plugin_key[0])
+		return; /* not configured yet */
+
+	char path[512];
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u",
+		 f->plugin_key, f->sample_rate);
+
+	struct lws_client_connect_info ci;
+	memset(&ci, 0, sizeof(ci));
+	ci.context = f->lws_ctx;
+	ci.address = f->server;
+	ci.port = 443;
+	ci.path = path;
+	ci.host = f->server;
+	ci.origin = f->server;
+	ci.ssl_connection = LCCSCF_USE_SSL;
+	ci.protocol = NULL; /* server doesn't negotiate a subprotocol */
+	ci.local_protocol_name = "st-audio";
+
+	f->wsi = lws_client_connect_via_info(&ci);
+	if (!f->wsi)
+		blog(LOG_WARNING, "[streamtranslate] connect attempt failed to start");
+}
+
+static void *st_ws_thread(void *arg)
+{
+	struct st_filter *f = arg;
+	uint64_t next_retry = 0;
+
+	struct lws_context_creation_info info;
+	memset(&info, 0, sizeof(info));
+	info.port = CONTEXT_PORT_NO_LISTEN;
+	info.protocols = st_protocols;
+	info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+	info.user = f;
+
+	f->lws_ctx = lws_create_context(&info);
+	if (!f->lws_ctx) {
+		blog(LOG_ERROR, "[streamtranslate] lws context creation failed");
+		return NULL;
+	}
+
+	while (!f->stop) {
+		if (!f->wsi) {
+			uint64_t now = os_gettime_ns();
+			if (now >= next_retry) {
+				st_connect(f);
+				next_retry = now + 3000000000ULL; /* 3s backoff */
+			}
+		}
+		lws_service(f->lws_ctx, 50);
+	}
+
+	if (f->wsi) {
+		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+		lws_service(f->lws_ctx, 50);
+	}
+	lws_context_destroy(f->lws_ctx);
+	f->lws_ctx = NULL;
+	f->wsi = NULL;
+	f->connected = false;
+	return NULL;
+}
+
+/* ---------------- OBS filter ---------------- */
+
+static const char *st_get_name(void *unused)
+{
+	(void)unused;
+	return "StreamTranslate (live translated captions)";
+}
+
+static void st_build_resampler(struct st_filter *f)
+{
+	if (f->resampler) {
+		audio_resampler_destroy(f->resampler);
+		f->resampler = NULL;
+	}
+	const struct audio_output_info *aoi = audio_output_get_info(obs_get_audio());
+	if (!aoi)
+		return;
+	f->sample_rate = aoi->samples_per_sec;
+
+	struct resample_info src = {
+		.samples_per_sec = aoi->samples_per_sec,
+		.format = AUDIO_FORMAT_FLOAT_PLANAR,
+		.speakers = aoi->speakers,
+	};
+	struct resample_info dst = {
+		.samples_per_sec = aoi->samples_per_sec,
+		.format = AUDIO_FORMAT_16BIT,
+		.speakers = SPEAKERS_MONO,
+	};
+	f->resampler = audio_resampler_create(&dst, &src);
+	if (!f->resampler)
+		blog(LOG_ERROR, "[streamtranslate] resampler creation failed");
+}
+
+static void st_update(void *data, obs_data_t *settings)
+{
+	struct st_filter *f = data;
+	const char *server = obs_data_get_string(settings, "server");
+	const char *key = obs_data_get_string(settings, "plugin_key");
+
+	bool changed = strcmp(f->server, server ? server : "") != 0 ||
+		       strcmp(f->plugin_key, key ? key : "") != 0;
+
+	snprintf(f->server, sizeof(f->server), "%s", server ? server : "");
+	snprintf(f->plugin_key, sizeof(f->plugin_key), "%s", key ? key : "");
+
+	if (changed && f->wsi) {
+		/* reconnect with new credentials: close current, thread will redial */
+		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+		lws_cancel_service(f->lws_ctx);
+	}
+}
+
+static void *st_create(obs_data_t *settings, obs_source_t *context)
+{
+	struct st_filter *f = bzalloc(sizeof(struct st_filter));
+	f->context = context;
+	pthread_mutex_init(&f->qlock, NULL);
+	st_build_resampler(f);
+	st_update(f, settings);
+	f->stop = false;
+	pthread_create(&f->thread, NULL, st_ws_thread, f);
+	return f;
+}
+
+static void st_destroy(void *data)
+{
+	struct st_filter *f = data;
+	f->stop = true;
+	if (f->lws_ctx)
+		lws_cancel_service(f->lws_ctx);
+	pthread_join(f->thread, NULL);
+	st_queue_clear(f);
+	pthread_mutex_destroy(&f->qlock);
+	if (f->resampler)
+		audio_resampler_destroy(f->resampler);
+	bfree(f);
+}
+
+static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data *audio)
+{
+	struct st_filter *f = data;
+	if (!f->resampler || !f->connected || !audio || !audio->frames)
+		return audio; /* always pass audio through untouched */
+
+	uint8_t *out[MAX_AV_PLANES] = {0};
+	uint32_t out_frames = 0;
+	uint64_t ts_offset = 0;
+
+	if (audio_resampler_resample(f->resampler, out, &out_frames, &ts_offset,
+				     (const uint8_t *const *)audio->data,
+				     audio->frames) &&
+	    out_frames > 0 && out[0]) {
+		st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
+		if (f->lws_ctx)
+			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
+	}
+	return audio;
+}
+
+static obs_properties_t *st_get_properties(void *data)
+{
+	(void)data;
+	obs_properties_t *props = obs_properties_create();
+	obs_properties_add_text(props, "plugin_key",
+				"Plugin Key (from your StreamTranslate account)",
+				OBS_TEXT_PASSWORD);
+	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
+	return props;
+}
+
+static void st_get_defaults(obs_data_t *settings)
+{
+	obs_data_set_default_string(settings, "server", "streamtranslate.live");
+	obs_data_set_default_string(settings, "plugin_key", "");
+}
+
+static struct obs_source_info st_filter_info = {
+	.id = "streamtranslate_audio_filter",
+	.type = OBS_SOURCE_TYPE_FILTER,
+	.output_flags = OBS_SOURCE_AUDIO,
+	.get_name = st_get_name,
+	.create = st_create,
+	.destroy = st_destroy,
+	.update = st_update,
+	.filter_audio = st_filter_audio,
+	.get_properties = st_get_properties,
+	.get_defaults = st_get_defaults,
+};
+
+bool obs_module_load(void)
+{
+	obs_register_source(&st_filter_info);
+	blog(LOG_INFO, "[streamtranslate] plugin loaded");
+	return true;
+}
