@@ -171,6 +171,7 @@ jobs:
           if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlib.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlib.lib zlib.lib
           if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlibstatic.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlibstatic.lib zlib.lib
           if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\z.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\z.lib zlib.lib
+          if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zs.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zs.lib zlib.lib
           if not exist zlib.lib (echo NO ZLIB VARIANT FOUND & exit /b 1)
       - name: Compile plugin DLL
         shell: cmd
