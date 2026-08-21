@@ -1,5 +1,6 @@
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]
+dll = sys.argv[3] if len(sys.argv) > 3 else "obs.dll"
 names = []
 started = False
 for line in open(src, errors="ignore"):
@@ -11,7 +12,7 @@ for line in open(src, errors="ignore"):
         if m:
             names.append(m.group(1))
 with open(dst, "w") as f:
-    f.write("LIBRARY obs.dll\nEXPORTS\n")
+    f.write(f"LIBRARY {dll}\nEXPORTS\n")
     for n in names:
         f.write(f"    {n}\n")
-print(f"{len(names)} exports")
+print(f"{len(names)} exports from {dll}")
