@@ -22,6 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 
 OBS_DECLARE_MODULE()
 
@@ -208,6 +214,65 @@ static void st_connect(struct st_filter *f)
 		blog(LOG_WARNING, "[streamtranslate] connect attempt failed to start");
 }
 
+/* TLS trust: the bundled OpenSSL has no OS certificate store, so server
+ * verification fails silently without a CA file. We ship Mozilla's CA bundle
+ * (cacert.pem) inside the plugin and point lws at it. Resolved relative to
+ * this module's own binary location. */
+static const char *st_ca_bundle_path(void)
+{
+	static char path[1024];
+	static int resolved = 0;
+	if (resolved)
+		return path[0] ? path : NULL;
+	resolved = 1;
+	path[0] = 0;
+#ifdef _WIN32
+	HMODULE hm = NULL;
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+				       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			       (LPCSTR)&st_ca_bundle_path, &hm)) {
+		char mod[1024];
+		if (GetModuleFileNameA(hm, mod, sizeof(mod))) {
+			char *slash = strrchr(mod, '\\');
+			if (slash) {
+				*slash = 0;
+				snprintf(path, sizeof(path), "%s\\cacert.pem", mod);
+			}
+		}
+	}
+#else
+	Dl_info dli;
+	if (dladdr((void *)&st_ca_bundle_path, &dli) && dli.dli_fname) {
+		char mod[1024];
+		snprintf(mod, sizeof(mod), "%s", dli.dli_fname);
+		char *slash = strrchr(mod, '/');
+		if (slash) {
+			*slash = 0;
+			/* macOS bundle: .../Contents/MacOS -> .../Contents/Resources/cacert.pem */
+			char *macos = strstr(mod, "/Contents/MacOS");
+			if (macos) {
+				*macos = 0;
+				snprintf(path, sizeof(path), "%s/Contents/Resources/cacert.pem", mod);
+			} else {
+				snprintf(path, sizeof(path), "%s/cacert.pem", mod);
+			}
+		}
+	}
+	if (path[0] && access(path, R_OK) != 0) {
+		/* fall back to common system stores (Linux/cloud OBS) */
+		if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
+			snprintf(path, sizeof(path), "/etc/ssl/certs/ca-certificates.crt");
+		else
+			path[0] = 0;
+	}
+#endif
+	if (path[0])
+		blog(LOG_INFO, "[streamtranslate] CA bundle: %s", path);
+	else
+		blog(LOG_WARNING, "[streamtranslate] no CA bundle found — TLS verification may fail");
+	return path[0] ? path : NULL;
+}
+
 static void *st_ws_thread(void *arg)
 {
 	struct st_filter *f = arg;
@@ -219,6 +284,7 @@ static void *st_ws_thread(void *arg)
 	info.protocols = st_protocols;
 	info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
 	info.user = f;
+	info.client_ssl_ca_filepath = st_ca_bundle_path();
 
 	f->lws_ctx = lws_create_context(&info);
 	if (!f->lws_ctx) {
