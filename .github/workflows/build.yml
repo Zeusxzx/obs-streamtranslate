@@ -66,6 +66,10 @@ jobs:
           </dict>
           </plist>
           PLIST
+      - name: Bundle CA certificates
+        run: |
+          mkdir -p dist/obs-streamtranslate.plugin/Contents/Resources
+          curl -sSL -o dist/obs-streamtranslate.plugin/Contents/Resources/cacert.pem https://curl.se/ca/cacert.pem
       - name: Bundle dylib dependencies (no brew needed on user machines)
         run: |
           BIN=dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate
@@ -206,6 +210,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "pkg/obs-plugins/64bit" | Out-Null
           Copy-Item obs-streamtranslate.dll pkg/obs-plugins/64bit/
+          Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile pkg/obs-plugins/64bit/cacert.pem
           Compress-Archive -Path pkg/* -DestinationPath StreamTranslate-OBS-Plugin-Windows.zip
       - name: Upload artifact
         uses: actions/upload-artifact@v4
