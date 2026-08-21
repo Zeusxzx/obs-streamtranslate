@@ -164,6 +164,14 @@ jobs:
           #define OBS_RELEASE_CANDIDATE 0
           #define OBS_BETA 0
           "@ | Set-Content genhdr/obsconfig.h
+      - name: Locate zlib static lib (name varies by vcpkg version)
+        shell: cmd
+        run: |
+          dir %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib
+          if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlib.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlib.lib zlib.lib
+          if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlibstatic.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\zlibstatic.lib zlib.lib
+          if exist %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\z.lib copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib\z.lib zlib.lib
+          if not exist zlib.lib (echo NO ZLIB VARIANT FOUND & exit /b 1)
       - name: Compile plugin DLL
         shell: cmd
         run: |
