@@ -128,7 +128,7 @@ jobs:
         with:
           arch: x64
       - name: Install libwebsockets (static)
-        run: vcpkg install libwebsockets:x64-windows-static
+        run: vcpkg install libwebsockets:x64-windows-static libuv:x64-windows-static
         shell: cmd
       - name: Fetch libobs headers
         run: git clone --depth 1 https://github.com/obsproject/obs-studio.git
@@ -139,12 +139,16 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/31.0.3/OBS-Studio-31.0.3-Windows.zip" -OutFile obs-win.zip
           Expand-Archive obs-win.zip -DestinationPath obs-win
           Copy-Item obs-win/bin/64bit/obs.dll .
+          Copy-Item obs-win/bin/64bit/w32-pthreads.dll .
       - name: Generate obs.lib import library
         shell: cmd
         run: |
           dumpbin /EXPORTS obs.dll > exports.txt
-          python make_def.py exports.txt obs.def
+          python make_def.py exports.txt obs.def obs.dll
           lib /def:obs.def /machine:x64 /out:obs.lib
+          dumpbin /EXPORTS w32-pthreads.dll > pexports.txt
+          python make_def.py pexports.txt w32-pthreads.def w32-pthreads.dll
+          lib /def:w32-pthreads.def /machine:x64 /out:w32-pthreads.lib
       - name: Stub obsconfig.h
         shell: pwsh
         run: |
@@ -168,8 +172,8 @@ jobs:
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:obs-streamtranslate.dll ^
             /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
-            obs.lib websockets.lib libssl.lib libcrypto.lib ^
-            ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib
+            obs.lib w32-pthreads.lib websockets.lib libssl.lib libcrypto.lib libuv.lib ^
+            ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib psapi.lib ole32.lib shell32.lib dbghelp.lib
       - name: Package zip
         shell: pwsh
         run: |
