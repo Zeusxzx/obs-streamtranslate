@@ -128,7 +128,7 @@ jobs:
         with:
           arch: x64
       - name: Install libwebsockets (static)
-        run: vcpkg install libwebsockets:x64-windows-static libuv:x64-windows-static
+        run: vcpkg install libwebsockets:x64-windows-static libuv:x64-windows-static zlib:x64-windows-static
         shell: cmd
       - name: Fetch libobs headers
         run: git clone --depth 1 https://github.com/obsproject/obs-studio.git
@@ -172,7 +172,7 @@ jobs:
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:obs-streamtranslate.dll ^
             /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
-            obs.lib w32-pthreads.lib websockets.lib libssl.lib libcrypto.lib libuv.lib ^
+            obs.lib w32-pthreads.lib websockets.lib libssl.lib libcrypto.lib libuv.lib zlib.lib ^
             ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib psapi.lib ole32.lib shell32.lib dbghelp.lib
       - name: Package zip
         shell: pwsh
