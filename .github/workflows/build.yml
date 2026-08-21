@@ -103,12 +103,30 @@ jobs:
           otool -L "$FW/$LWS_BASE"
       - name: Build branded .pkg installer
         run: |
-          mkdir -p pkgroot out
-          cp -R dist/obs-streamtranslate.plugin pkgroot/
+          # OBS on Apple Silicon ONLY scans ~/Library/Application Support/obs-studio/plugins
+          # (the /Library system path is Intel-legacy, compiled out on arm64 — see
+          # OBSBasic.cpp AddExtraModulePaths). Payload lands in a neutral spot and a
+          # postinstall script copies it into the logged-in user's home plugins dir.
+          mkdir -p "pkgroot/Library/Application Support/StreamTranslate" out scripts
+          cp -R dist/obs-streamtranslate.plugin "pkgroot/Library/Application Support/StreamTranslate/"
+          cat > scripts/postinstall << 'SCRIPT'
+          #!/bin/bash
+          loggedInUser=$(stat -f%Su /dev/console)
+          [ -z "$loggedInUser" ] || [ "$loggedInUser" = "root" ] && loggedInUser=$(ls -l /dev/console | awk '{print $3}')
+          userHome=$(dscl . -read "/Users/$loggedInUser" NFSHomeDirectory | awk '{print $2}')
+          dest="$userHome/Library/Application Support/obs-studio/plugins"
+          mkdir -p "$dest"
+          rm -rf "$dest/obs-streamtranslate.plugin"
+          cp -R "/Library/Application Support/StreamTranslate/obs-streamtranslate.plugin" "$dest/"
+          chown -R "$loggedInUser" "$dest/obs-streamtranslate.plugin"
+          exit 0
+          SCRIPT
+          chmod +x scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.0 \
-            --install-location "/Library/Application Support/obs-studio/plugins" \
+            --version 0.1.1 \
+            --scripts scripts \
+            --install-location "/" \
             component.pkg
           productbuild --distribution installer/distribution.xml \
             --resources installer \
