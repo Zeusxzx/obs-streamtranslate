@@ -119,3 +119,65 @@ jobs:
         with:
           name: obs-streamtranslate-macos-installer
           path: out/StreamTranslate-OBS-Plugin.pkg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install libwebsockets (static)
+        run: vcpkg install libwebsockets:x64-windows-static
+        shell: cmd
+      - name: Fetch libobs headers
+        run: git clone --depth 1 https://github.com/obsproject/obs-studio.git
+        shell: cmd
+      - name: Download OBS release (for obs.dll)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/obsproject/obs-studio/releases/download/31.0.3/OBS-Studio-31.0.3-Windows.zip" -OutFile obs-win.zip
+          Expand-Archive obs-win.zip -DestinationPath obs-win
+          Copy-Item obs-win/bin/64bit/obs.dll .
+      - name: Generate obs.lib import library
+        shell: cmd
+        run: |
+          dumpbin /EXPORTS obs.dll > exports.txt
+          python make_def.py exports.txt obs.def
+          lib /def:obs.def /machine:x64 /out:obs.lib
+      - name: Stub obsconfig.h
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path genhdr | Out-Null
+          @"
+          #pragma once
+          #define OBS_VERSION "31.0.0"
+          #define OBS_VERSION_CANONICAL "31.0.0"
+          #define OBS_DATA_PATH "../../data"
+          #define OBS_INSTALL_PREFIX ""
+          #define OBS_PLUGIN_DESTINATION "obs-plugins"
+          #define OBS_RELATIVE_PREFIX "../../"
+          #define OBS_RELEASE_CANDIDATE 0
+          #define OBS_BETA 0
+          "@ | Set-Content genhdr/obsconfig.h
+      - name: Compile plugin DLL
+        shell: cmd
+        run: |
+          cl /nologo /O2 /MT /std:c17 /LD plugin.c ^
+            /I obs-studio\libobs /I genhdr ^
+            /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
+            /Fe:obs-streamtranslate.dll ^
+            /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
+            obs.lib websockets.lib libssl.lib libcrypto.lib zlib.lib ^
+            ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib
+      - name: Package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "pkg/obs-plugins/64bit" | Out-Null
+          Copy-Item obs-streamtranslate.dll pkg/obs-plugins/64bit/
+          Compress-Archive -Path pkg/* -DestinationPath StreamTranslate-OBS-Plugin-Windows.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-streamtranslate-windows-x64
+          path: StreamTranslate-OBS-Plugin-Windows.zip
