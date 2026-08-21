@@ -168,7 +168,7 @@ jobs:
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:obs-streamtranslate.dll ^
             /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
-            obs.lib websockets.lib libssl.lib libcrypto.lib zlib.lib ^
+            obs.lib websockets.lib libssl.lib libcrypto.lib ^
             ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib
       - name: Package zip
         shell: pwsh
