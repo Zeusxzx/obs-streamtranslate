@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -46,6 +47,10 @@ struct st_filter {
 	char server[256];
 	char plugin_key[128];
 
+	/* live status shown in the filter UI */
+	char status[320];
+	int  audio_chunks_sent;
+
 	/* audio conversion */
 	audio_resampler_t *resampler;
 	uint32_t sample_rate;
@@ -62,6 +67,15 @@ struct st_filter {
 	struct st_chunk *qhead, *qtail;
 	int qcount;
 };
+
+static void st_set_status(struct st_filter *f, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(f->status, sizeof(f->status), fmt, ap);
+	va_end(ap);
+	blog(LOG_INFO, "[streamtranslate] %s", f->status);
+}
 
 /* ---------------- queue ---------------- */
 
@@ -141,7 +155,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
 	switch (reason) {
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
-		blog(LOG_INFO, "[streamtranslate] websocket connected");
+		st_set_status(f, "Connected to %s - streaming audio", f->server);
 		f->connected = true;
 		lws_callback_on_writable(wsi);
 		break;
@@ -163,14 +177,14 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-		blog(LOG_WARNING, "[streamtranslate] connection error: %s",
-		     in ? (const char *)in : "(unknown)");
+		st_set_status(f, "Connection FAILED: %s (server: %s) - retrying",
+			      in ? (const char *)in : "unknown error", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
 
 	case LWS_CALLBACK_CLIENT_CLOSED:
-		blog(LOG_INFO, "[streamtranslate] websocket closed");
+		st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
@@ -190,8 +204,10 @@ static void st_connect(struct st_filter *f)
 {
 	if (!f->lws_ctx || f->wsi)
 		return;
-	if (!f->plugin_key[0])
-		return; /* not configured yet */
+	if (!f->plugin_key[0]) {
+		st_set_status(f, "Not configured - paste your Plugin Key above");
+		return;
+	}
 
 	char path[512];
 	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u",
@@ -209,9 +225,10 @@ static void st_connect(struct st_filter *f)
 	ci.protocol = NULL; /* server doesn't negotiate a subprotocol */
 	ci.local_protocol_name = "st-audio";
 
+	st_set_status(f, "Connecting to %s ...", f->server);
 	f->wsi = lws_client_connect_via_info(&ci);
 	if (!f->wsi)
-		blog(LOG_WARNING, "[streamtranslate] connect attempt failed to start");
+		st_set_status(f, "Could not start connection to %s - check the Server field", f->server);
 }
 
 /* TLS trust: the bundled OpenSSL has no OS certificate store, so server
@@ -408,20 +425,55 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 				     audio->frames) &&
 	    out_frames > 0 && out[0]) {
 		st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
+		f->audio_chunks_sent++;
 		if (f->lws_ctx)
 			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
 	}
 	return audio;
 }
 
+static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
+{
+	struct st_filter *f = data;
+	(void)props;
+	(void)prop;
+	if (!f)
+		return false;
+	st_set_status(f, "Reconnecting ...");
+	if (f->wsi) {
+		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+	}
+	if (f->lws_ctx)
+		lws_cancel_service(f->lws_ctx);
+	return true;
+}
+
 static obs_properties_t *st_get_properties(void *data)
 {
-	(void)data;
+	struct st_filter *f = data;
 	obs_properties_t *props = obs_properties_create();
+
 	obs_properties_add_text(props, "plugin_key",
 				"Plugin Key (from your StreamTranslate account)",
 				OBS_TEXT_PASSWORD);
 	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
+
+	/* live status — updated by the connection thread */
+	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);
+	if (f) {
+		char line[420];
+		snprintf(line, sizeof(line), "%s%s", f->status[0] ? f->status : "Starting up ...",
+			 f->connected ? "" : "");
+		obs_property_set_long_description(st, line);
+		obs_data_t *s = obs_source_get_settings(f->context);
+		if (s) {
+			obs_data_set_string(s, "status_text", line);
+			obs_data_release(s);
+		}
+	}
+
+	obs_properties_add_button2(props, "reconnect", "Reconnect / Test connection",
+				   st_reconnect_clicked, f);
 	return props;
 }
 
