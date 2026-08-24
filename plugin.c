@@ -49,6 +49,7 @@ struct st_filter {
 
 	/* live status shown in the filter UI */
 	char status[320];
+	int  audio_chunks_captured;
 	int  audio_chunks_sent;
 
 	/* audio conversion */
@@ -75,6 +76,16 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
 	vsnprintf(f->status, sizeof(f->status), fmt, ap);
 	va_end(ap);
 	blog(LOG_INFO, "[streamtranslate] %s", f->status);
+	/* OBS builds the properties panel once; without this the Status line
+	 * shows whatever it said when the dialog opened. */
+	if (f->context) {
+		obs_data_t *sd = obs_source_get_settings(f->context);
+		if (sd) {
+			obs_data_set_string(sd, "status_text", f->status);
+			obs_data_release(sd);
+		}
+		obs_source_update_properties(f->context);
+	}
 }
 
 /* ---------------- queue ---------------- */
@@ -163,7 +174,9 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLIENT_WRITEABLE: {
 		struct st_chunk *c = st_queue_pop(f);
 		if (c) {
-			lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
+			int wrote = lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
+			if (wrote > 0)
+				f->audio_chunks_sent++;
 			free(c->buf);
 			free(c);
 			lws_callback_on_writable(wsi);
@@ -309,6 +322,7 @@ static void *st_ws_thread(void *arg)
 		return NULL;
 	}
 
+	uint64_t last_status = 0;
 	while (!f->stop) {
 		if (!f->wsi) {
 			uint64_t now = os_gettime_ns();
@@ -317,7 +331,26 @@ static void *st_ws_thread(void *arg)
 				next_retry = now + 3000000000ULL; /* 3s backoff */
 			}
 		}
-		lws_service(f->lws_ctx, 50);
+		/* Ask for a writeable slot from THIS thread whenever audio is waiting.
+		 * (Relying on lws_cancel_service from the audio thread proved unreliable:
+		 * the socket connected but never sent a byte, so the server's watchdog
+		 * closed the silent connection after ~30s.) */
+		if (f->wsi && f->connected) {
+			pthread_mutex_lock(&f->qlock);
+			int pending = f->qcount;
+			pthread_mutex_unlock(&f->qlock);
+			if (pending > 0)
+				lws_callback_on_writable(f->wsi);
+		}
+		lws_service(f->lws_ctx, 20);
+
+		/* refresh the status line with live counters once a second */
+		uint64_t now2 = os_gettime_ns();
+		if (f->connected && now2 - last_status > 1000000000ULL) {
+			last_status = now2;
+			st_set_status(f, "Connected to %s - captured %d, sent %d audio chunks",
+				      f->server, f->audio_chunks_captured, f->audio_chunks_sent);
+		}
 	}
 
 	if (f->wsi) {
@@ -413,7 +446,14 @@ static void st_destroy(void *data)
 static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data *audio)
 {
 	struct st_filter *f = data;
-	if (!f->resampler || !f->connected || !audio || !audio->frames)
+	if (!audio || !audio->frames)
+		return audio;
+	if (!f->resampler) {
+		st_build_resampler(f); /* audio subsystem may not have been ready at create time */
+		if (!f->resampler)
+			return audio;
+	}
+	if (!f->connected)
 		return audio; /* always pass audio through untouched */
 
 	uint8_t *out[MAX_AV_PLANES] = {0};
@@ -425,7 +465,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 				     audio->frames) &&
 	    out_frames > 0 && out[0]) {
 		st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
-		f->audio_chunks_sent++;
+		f->audio_chunks_captured++;
 		if (f->lws_ctx)
 			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
 	}
