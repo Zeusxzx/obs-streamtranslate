@@ -49,6 +49,7 @@ struct st_filter {
 
 	/* live status shown in the filter UI */
 	char status[320];
+	bool muted_now;
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
 
@@ -346,7 +347,7 @@ static void *st_ws_thread(void *arg)
 
 		/* refresh the status line with live counters once a second */
 		uint64_t now2 = os_gettime_ns();
-		if (f->connected && now2 - last_status > 1000000000ULL) {
+		if (f->connected && !f->muted_now && now2 - last_status > 1000000000ULL) {
 			last_status = now2;
 			st_set_status(f, "Connected to %s - captured %d, sent %d audio chunks",
 				      f->server, f->audio_chunks_captured, f->audio_chunks_sent);
@@ -448,6 +449,23 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 	struct st_filter *f = data;
 	if (!audio || !audio->frames)
 		return audio;
+
+	/* OBS applies a source's mute AFTER its filter chain, so a muted mic still
+	 * reaches us. Without this check a streamer who mutes for a private moment
+	 * would still be transcribed and captioned on stream. Also honour the filter's
+	 * own enabled toggle (the eye icon) as a pause control. */
+	obs_source_t *parent = obs_filter_get_parent(f->context);
+	bool blocked = (parent && obs_source_muted(parent)) || !obs_source_enabled(f->context);
+	if (blocked) {
+		if (!f->muted_now) {
+			f->muted_now = true;
+			st_set_status(f, "Muted in OBS - not sending audio (captured %d, sent %d)",
+				      f->audio_chunks_captured, f->audio_chunks_sent);
+		}
+		return audio;
+	}
+	if (f->muted_now)
+		f->muted_now = false;
 	if (!f->resampler) {
 		st_build_resampler(f); /* audio subsystem may not have been ready at create time */
 		if (!f->resampler)
